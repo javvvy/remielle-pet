@@ -25,3 +25,6 @@ config/secrets.yml
 # 临时文件
 *.tmp
 *.bak
+
+release-v0.1.0/
+release-v0.2.1/

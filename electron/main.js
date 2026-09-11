@@ -85,6 +85,11 @@ const FOLLOW = {
   BODY_CX: 130,   // 身体中心在窗内坐标 = CSS(top:60,left:10,240×240)+ 120
   BODY_CY: 180,
 }
+// 桌宠窗口固定宽高(与 createPetWindow 保持一致)。夹取范围与 setBounds 必须用这个
+// 固定值,不能用 getSize():在 Windows 高 DPI 下,setPosition 把窗口移到屏幕底部时
+// 会触发窗口尺寸逐帧膨胀,导致下边界约束持续收缩、桌宠向上漂移甚至被挤出屏幕。
+const PET_W = 260
+const PET_H = 360
 let followEnabled = settings.load().followEnabled  // 光标跟随开关,持久化于 settings.json(默认开启)
 let followable = true     // 状态机允许(启动即空闲,初始true)
 let petHold = false       // 渲染进程在桌宠上按住指针(拖动/点击/右键)
@@ -101,7 +106,6 @@ function followAllowed() {
 function followTick(cursor = screen.getCursorScreenPoint()) {
   if (!followAllowed()) return false
   const [x, y] = petWin.getPosition()
-  const [w, h] = petWin.getSize()
   const tx = cursor.x + FOLLOW.OFFSET_X - FOLLOW.BODY_CX
   const ty = cursor.y + FOLLOW.OFFSET_Y - FOLLOW.BODY_CY
   const dx = tx - x
@@ -113,9 +117,10 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
   let ny = y + (dy / dist) * step
   // 夹在光标所在显示器工作区内(支持多显示器,不出屏)
   const wa = screen.getDisplayNearestPoint(cursor).workArea
-  nx = Math.min(Math.max(nx, wa.x), wa.x + wa.width - w)
-  ny = Math.min(Math.max(ny, wa.y), wa.y + wa.height - h)
-  petWin.setPosition(Math.round(nx), Math.round(ny))
+  nx = Math.min(Math.max(nx, wa.x), wa.x + wa.width - PET_W)
+  ny = Math.min(Math.max(ny, wa.y), wa.y + wa.height - PET_H)
+  // 用 setBounds 显式带回固定宽高,避免 setPosition 在屏幕底部引发窗口尺寸漂移
+  petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: PET_W, height: PET_H })
   // 朝移动方向转身(素材为微朝右的3/4正面,右移不翻转、左移镜像)
   if (Math.abs(dx) > 4) {
     const dir = dx > 0 ? 1 : -1
@@ -128,10 +133,10 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
 function createPetWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
   petWin = new BrowserWindow({
-    width: 260,
-    height: 360,
-    x: Math.round(width / 2 - 130),
-    y: Math.round(height / 2 - 180),
+    width: PET_W,
+    height: PET_H,
+    x: Math.round(width / 2 - PET_W / 2),
+    y: Math.round(height / 2 - PET_H / 2),
     transparent: true,
     frame: false,
     resizable: false,
@@ -293,7 +298,7 @@ function registerIpc() {
     accX -= mx
     accY -= my
     const [x, y] = petWin.getPosition()
-    petWin.setPosition(x + mx, y + my)
+    petWin.setBounds({ x: x + mx, y: y + my, width: PET_W, height: PET_H })
   })
 
   // 渲染进程按住桌宠(拖动/点击/右键按下)时暂停跟随
