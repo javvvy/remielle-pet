@@ -62,14 +62,66 @@ function setPetGif(gif) {
 
 function enterIdle() {
   clearTimeout(petTimer)
+  followable = true
   setPetGif(random(IDLE_GIFS))
 }
 
 function enterAppreciate() {
   clearTimeout(petTimer)
+  followable = true
   setPetGif(random(APPRECIATE_GIFS))
   const duration = randInt(10, 60) * 1000
   petTimer = setTimeout(enterIdle, duration)
+}
+
+// ---------- 光标跟随(空闲时) ----------
+const FOLLOW = {
+  INTERVAL: 30,   // ms/次(约33fps)
+  LERP: 0.16,     // 每次tick的逼近比例
+  MAX_STEP: 14,   // 单次tick最大位移px(≈460px/s,防止瞬移)
+  OFFSET_X: 110,  // 身体中心停在光标右下方(110,70),不遮挡指针
+  OFFSET_Y: 70,
+  DEADZONE: 24,   // 距目标小于该值停止,避免抖动
+  BODY_CX: 130,   // 身体中心在窗内坐标 = CSS(top:60,left:10,240×240)+ 120
+  BODY_CY: 180,
+}
+let followEnabled = settings.load().followEnabled  // 光标跟随开关,持久化于 settings.json(默认开启)
+let followable = true     // 状态机允许(启动即空闲,初始true)
+let petHold = false       // 渲染进程在桌宠上按住指针(拖动/点击/右键)
+let menuOpen = false      // 右键菜单打开中
+let lastFlip = 0          // 1朝右 / -1朝左
+
+function followAllowed() {
+  return followEnabled && followable && !pinned && !petHold && !menuOpen
+    && petWin && !petWin.isDestroyed()
+    && !(homeWin && !homeWin.isDestroyed() && homeWin.isVisible())
+}
+
+// cursor 参数默认取真实光标,自测时注入合成坐标(与显示器无关)
+function followTick(cursor = screen.getCursorScreenPoint()) {
+  if (!followAllowed()) return false
+  const [x, y] = petWin.getPosition()
+  const [w, h] = petWin.getSize()
+  const tx = cursor.x + FOLLOW.OFFSET_X - FOLLOW.BODY_CX
+  const ty = cursor.y + FOLLOW.OFFSET_Y - FOLLOW.BODY_CY
+  const dx = tx - x
+  const dy = ty - y
+  const dist = Math.hypot(dx, dy)
+  if (dist <= FOLLOW.DEADZONE) return false
+  const step = Math.min(dist * FOLLOW.LERP, FOLLOW.MAX_STEP)
+  let nx = x + (dx / dist) * step
+  let ny = y + (dy / dist) * step
+  // 夹在光标所在显示器工作区内(支持多显示器,不出屏)
+  const wa = screen.getDisplayNearestPoint(cursor).workArea
+  nx = Math.min(Math.max(nx, wa.x), wa.x + wa.width - w)
+  ny = Math.min(Math.max(ny, wa.y), wa.y + wa.height - h)
+  petWin.setPosition(Math.round(nx), Math.round(ny))
+  // 朝移动方向转身(素材为微朝右的3/4正面,右移不翻转、左移镜像)
+  if (Math.abs(dx) > 4) {
+    const dir = dx > 0 ? 1 : -1
+    if (dir !== lastFlip) { lastFlip = dir; sendToPet('pet:flip', dir) }
+  }
+  return true
 }
 
 // ---------- 桌宠窗口 ----------
@@ -176,6 +228,7 @@ async function handleSend(text) {
   sendToHome('chat:reset', current)
 
   streaming = true
+  followable = false
   setPetGif(CREATING_GIF)
   clearTimeout(petTimer)
   // 创作过程中随机弹表情
@@ -218,11 +271,13 @@ function registerIpc() {
         label: pinned ? '解除固定' : '固定',
         click: () => { pinned = !pinned; sendToPet('pet:pinned', pinned) },
       },
+      { label: '跟随光标', type: 'checkbox', checked: followEnabled, click: m => { followEnabled = settings.save({ followEnabled: m.checked }).followEnabled } },
       { label: '设置', click: () => sendToPet('pet:tip', '该功能正在开发中~') },
       { label: '退出', click: () => { app.quitting = true; app.quit() } },
     ])
     // 弹出在主体右方
-    menu.popup({ window: petWin, x: 262, y: 60 })
+    menuOpen = true
+    menu.popup({ window: petWin, x: 262, y: 60, callback: () => { menuOpen = false } })
   })
 
   // 桌宠拖动(未固定时可拖动);高DPI/触摸板下dx/dy为小数,累积后取整,避免抖动和崩溃
@@ -240,6 +295,9 @@ function registerIpc() {
     const [x, y] = petWin.getPosition()
     petWin.setPosition(x + mx, y + my)
   })
+
+  // 渲染进程按住桌宠(拖动/点击/右键按下)时暂停跟随
+  ipcMain.on('pet:hold', (_e, v) => { petHold = !!v })
 
   ipcMain.handle('chat:send', (_e, text) => handleSend(text))
   ipcMain.handle('chat:new', () => {
@@ -268,9 +326,13 @@ function registerIpc() {
   // 渲染进程诊断上报(资源加载失败等)
   ipcMain.on('diag:error', (_e, msg) => logError(`[renderer] ${msg}`))
 
-  // 设置:大模型配置读写
+  // 设置:大模型配置与光标跟随开关读写(保存后同步主进程跟随状态)
   ipcMain.handle('settings:get', () => settings.load())
-  ipcMain.handle('settings:save', (_e, cfg) => settings.save(cfg || {}))
+  ipcMain.handle('settings:save', (_e, cfg) => {
+    const saved = settings.save(cfg || {})
+    followEnabled = saved.followEnabled
+    return saved
+  })
 
   // 主页加载晚于事件时的补发标记(如配置缺失提示)
   ipcMain.handle('chat:promptFlags', () => {
@@ -300,6 +362,8 @@ if (!gotLock) {
     logError(`app started | occlusion-fix=on | sw-render=on | electron=${process.versions.electron}`)
     createPetWindow()
     registerIpc()
+    // 光标跟随常驻轮询(守卫不满足时空转,33次/秒布尔检查开销可忽略)
+    setInterval(() => followTick(), FOLLOW.INTERVAL)
     // 自动化测试:PET_AUTOTEST=1 时在主进程直接驱动对话链路(密钥经环境变量传入,不进源码)
     if (!app.isPackaged && process.env.PET_AUTOTEST === '1') {
       setTimeout(async () => {
@@ -319,6 +383,28 @@ if (!gotLock) {
           } else {
             logError('[autotest] T4 skipped (no PET_TEST_KEY)')
           }
+          // T5/T6: 光标跟随逻辑(注入合成光标坐标)
+          if (homeWin) homeWin.hide()
+          followEnabled = true; followable = true; pinned = false; petHold = false; menuOpen = false
+          let p = petWin.getPosition()
+          followTick({ x: p[0] + 300, y: p[1] + 100 })
+          let q = petWin.getPosition()
+          logError(`[autotest] T5 follow: moved=${Math.hypot(q[0] - p[0], q[1] - p[1]).toFixed(1)}px (expect >0)`)
+          followTick({ x: q[0] - 300, y: q[1] })
+          logError(`[autotest] T5b follow-flip: lastFlip=${lastFlip} (expect -1)`)
+          followable = false
+          const f = petWin.getPosition()
+          followTick({ x: f[0] + 300, y: f[1] })
+          logError(`[autotest] T6 follow-guard: dx=${petWin.getPosition()[0] - f[0]} (expect 0)`)
+          followable = true
+          // T7: 光标跟随开关持久化(save 合并语义:局部保存不覆盖其它字段)
+          const s1 = settings.save({ followEnabled: false })
+          logError(`[autotest] T7 follow-persist: saved=${s1.followEnabled} loaded=${settings.load().followEnabled} (expect false false)`)
+          const s2 = settings.save({ model: 'glm-4-flash' })
+          logError(`[autotest] T7b follow-merge: model=${s2.model} followEnabled=${s2.followEnabled} (expect glm-4-flash false)`)
+          settings.save({ followEnabled: true })
+          logError(`[autotest] T7c follow-restore: loaded=${settings.load().followEnabled} (expect true)`)
+          followEnabled = true
           logError('[autotest] === end ===')
         } catch (e) {
           logError(`[autotest] ERROR ${e.stack || e}`)

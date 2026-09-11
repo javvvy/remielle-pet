@@ -12,6 +12,7 @@
     <img
       ref="petEl"
       class="pet-body"
+      :class="{ flipped }"
       :key="gif"
       :src="gifSrc"
       draggable="false"
@@ -85,6 +86,7 @@ const emoji = ref('')
 const emojiKey = ref(0)
 const inputVisible = ref(false)
 const pinned = ref(false)
+const flipped = ref(false)
 const tip = ref('')
 const draft = ref('')
 const petEl = ref(null)
@@ -133,6 +135,7 @@ let lastX = 0
 let lastY = 0
 
 function onPointerDown(e) {
+  ipcSend('pet:hold', true)
   if (e.button !== 0) return
   dragging = true
   moved = false
@@ -152,6 +155,7 @@ function onPointerMove(e) {
 }
 
 function onPointerUp() {
+  ipcSend('pet:hold', false)
   if (dragging && !moved) popRandomEmoji()
   dragging = false
 }
@@ -190,6 +194,7 @@ onMounted(() => {
     showTip(v ? '已固定' : '已解除固定')
   }))
   offs.push(hookOn('pet:tip', t => showTip(t)))
+  offs.push(hookOn('pet:flip', d => (flipped.value = d === -1)))
 })
 
 onBeforeUnmount(() => offs.forEach(off => off()))
@@ -209,6 +214,9 @@ onBeforeUnmount(() => offs.forEach(off => off()))
   height: 240px;
   object-fit: contain;
   cursor: pointer;
+}
+.pet-body.flipped {
+  transform: scaleX(-1);
 }
 .emoji-pop {
   position: absolute;

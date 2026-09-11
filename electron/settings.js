@@ -8,16 +8,23 @@ const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
 function load() {
   try {
     const data = JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))
-    return { model: data.model || '', apiKey: data.apiKey || '' }
+    return {
+      model: data.model || '',
+      apiKey: data.apiKey || '',
+      followEnabled: data.followEnabled !== false,
+    }
   } catch {
-    return { model: '', apiKey: '' }
+    return { model: '', apiKey: '', followEnabled: true }
   }
 }
 
 function save(cfg) {
+  // 合并语义:未传字段保留原值,避免局部保存(如开关切换)覆盖大模型配置
+  const prev = load()
   const data = {
-    model: String(cfg.model || '').trim(),
-    apiKey: String(cfg.apiKey || '').trim(),
+    model: String(cfg.model ?? prev.model ?? '').trim(),
+    apiKey: String(cfg.apiKey ?? prev.apiKey ?? '').trim(),
+    followEnabled: cfg.followEnabled === undefined ? prev.followEnabled : !!cfg.followEnabled,
   }
   fs.mkdirSync(path.dirname(settingsFile()), { recursive: true })
   fs.writeFileSync(settingsFile(), JSON.stringify(data, null, 2), 'utf-8')

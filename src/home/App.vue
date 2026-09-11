@@ -72,6 +72,17 @@
             {{ modelCfg.model ? `当前模型:${modelCfg.model}` : '未配置,对话前需要配置模型ID和API Key' }}
           </div>
         </div>
+
+        <!-- 光标跟随开关 -->
+        <div class="settings-card" @click="toggleFollow">
+          <div class="settings-card-row">
+            <div>
+              <div class="settings-card-title">光标跟随</div>
+              <div class="settings-card-desc">空闲时桌宠跟随鼠标移动,对话/拖动/固定时自动暂停</div>
+            </div>
+            <div class="switch" :class="{ on: followEnabled }"><div class="knob"></div></div>
+          </div>
+        </div>
       </section>
 
       <!-- 关于栏(空内容) -->
@@ -157,6 +168,15 @@ const configPromptVisible = ref(false)
 
 async function refreshModelCfg() {
   modelCfg.value = await invoke('settings:get')
+  followEnabled.value = modelCfg.value.followEnabled !== false
+}
+
+const followEnabled = ref(true)
+
+async function toggleFollow() {
+  const saved = await invoke('settings:save', { followEnabled: !followEnabled.value })
+  followEnabled.value = saved.followEnabled
+  showToast(saved.followEnabled ? '光标跟随已开启' : '光标跟随已关闭')
 }
 
 function openModelConfig() {
@@ -425,6 +445,29 @@ onBeforeUnmount(() => offs.forEach(off => off()))
 .settings-card:hover { border-color: #e8b7cf; box-shadow: 0 6px 18px rgba(240, 98, 171, 0.1); }
 .settings-card-title { font-size: 15px; font-weight: 600; color: #444; margin-bottom: 8px; }
 .settings-card-desc { font-size: 13px; color: #999; }
+.settings-card + .settings-card { margin-top: 12px; }
+.settings-card-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-card-row .settings-card-title { margin-bottom: 4px; }
+.switch {
+  flex: none;
+  width: 42px;
+  height: 24px;
+  border-radius: 12px;
+  background: #e0d5dc;
+  padding: 2px;
+  box-sizing: border-box;
+  transition: background 0.15s;
+}
+.switch.on { background: #f3b6cf; }
+.switch .knob {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s;
+}
+.switch.on .knob { transform: translateX(18px); }
 
 /* 弹窗 */
 .modal-mask {
