@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, screen, Tray, nativeImage } = require('electron')
 const path = require('node:path')
 const store = require('./store')
 const settings = require('./settings')
@@ -204,6 +204,55 @@ function loadPage(win, page) {
   }
 }
 
+// ---------- 右键菜单(桌宠主体与托盘共用同一份选项) ----------
+function buildPetMenu() {
+  return Menu.buildFromTemplate([
+    { label: '对话框', click: () => sendToPet('pet:toggleInput') },
+    { label: '主页', click: () => createHomeWindow() },
+    {
+      label: pinned ? '解除固定' : '固定',
+      click: () => { pinned = !pinned; sendToPet('pet:pinned', pinned) },
+    },
+    { label: '跟随光标', type: 'checkbox', checked: followEnabled, click: m => { followEnabled = settings.save({ followEnabled: m.checked }).followEnabled } },
+    { label: '设置', click: () => sendToPet('pet:tip', '该功能正在开发中~') },
+    { label: '退出', click: () => { app.quitting = true; app.quit() } },
+  ])
+}
+
+// ---------- 系统托盘 ----------
+// 软件图标的位置:开发态在项目 build/ 下;打包后 build/ 不进入 asar,
+// 由 package.json 的 extraResources 复制到 resources/icon.png
+function appIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(__dirname, '../build/icon.png')
+}
+
+// 托盘图标需保持模块级引用,否则会被GC回收导致图标消失
+let tray = null
+function createTray() {
+  const src = nativeImage.createFromPath(appIconPath())
+  if (src.isEmpty()) {
+    logError(`tray icon load failed: ${appIconPath()}`)
+    return
+  }
+  // 按显示器DPI缩放到托盘实际需要的像素尺寸(Windows托盘基准16px),避免放大模糊
+  const scale = screen.getPrimaryDisplay().scaleFactor || 1
+  const px = Math.max(16, Math.round(16 * scale))
+  tray = new Tray(src.resize({ width: px, height: px, quality: 'best' }))
+  tray.setToolTip('蕾米埃尔')
+  logError(`tray ready | icon=${appIconPath()} px=${px}`)
+  // 左键:打开主页;右键:与桌宠主体一致的选项卡
+  tray.on('click', () => createHomeWindow())
+  tray.on('right-click', () => {
+    const menu = buildPetMenu()
+    // 菜单打开期间暂停跟随(与桌宠自身菜单一致),避免光标在托盘角时桌宠乱跑
+    menuOpen = true
+    menu.on('menu-will-close', () => { menuOpen = false })
+    tray.popUpContextMenu(menu)
+  })
+}
+
 // ---------- 对话 ----------
 function startNewConversation() {
   if (current.messages.length) store.archive(current)
@@ -269,17 +318,7 @@ function registerIpc() {
   // 桌宠右键菜单(原生菜单,避免被小窗口裁剪)
   ipcMain.on('app:contextmenu', () => {
     if (!petWin) return
-    const menu = Menu.buildFromTemplate([
-      { label: '对话框', click: () => sendToPet('pet:toggleInput') },
-      { label: '主页', click: () => createHomeWindow() },
-      {
-        label: pinned ? '解除固定' : '固定',
-        click: () => { pinned = !pinned; sendToPet('pet:pinned', pinned) },
-      },
-      { label: '跟随光标', type: 'checkbox', checked: followEnabled, click: m => { followEnabled = settings.save({ followEnabled: m.checked }).followEnabled } },
-      { label: '设置', click: () => sendToPet('pet:tip', '该功能正在开发中~') },
-      { label: '退出', click: () => { app.quitting = true; app.quit() } },
-    ])
+    const menu = buildPetMenu()
     // 弹出在主体右方
     menuOpen = true
     menu.popup({ window: petWin, x: 262, y: 60, callback: () => { menuOpen = false } })
@@ -367,6 +406,7 @@ if (!gotLock) {
     logError(`app started | occlusion-fix=on | sw-render=on | electron=${process.versions.electron}`)
     createPetWindow()
     registerIpc()
+    createTray()
     // 光标跟随常驻轮询(守卫不满足时空转,33次/秒布尔检查开销可忽略)
     setInterval(() => followTick(), FOLLOW.INTERVAL)
     // 自动化测试:PET_AUTOTEST=1 时在主进程直接驱动对话链路(密钥经环境变量传入,不进源码)

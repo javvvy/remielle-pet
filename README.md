@@ -10,6 +10,7 @@
 - **状态机**:空闲(发呆/思考/欣赏随机)→ 对话中(创作)→ 完成(创作并完成 1 秒)→ 欣赏(欣赏/自豪随机 10~60 秒)→ 回到空闲
 - **左键点击**:主体上方随机弹出表情包(0.5 秒冷却)
 - **右键菜单**(主体右方):对话框(开关桌宠输入框)/ 主页 / 固定(固定后不可拖动)/ 跟随光标(空闲时跟随鼠标,默认开启)/ 设置(开发中)/ 退出
+- **系统托盘**:托盘图标即软件图标;左键打开主页,右键弹出与桌宠主体完全一致的选项卡(菜单打开期间跟随暂停,避免光标停在托盘角时桌宠乱跑)
 - **拖动**:未固定时可左键拖动到任意位置
 - **光标跟随**:空闲时向鼠标光标缓动靠近并停在光标右下方,随移动方向转身;对话中/固定/拖动/菜单打开/主页可见时暂停;主页设置页与右键菜单均可开关,状态持久化(默认开启)
 - **输入框**:默认隐藏,右键菜单开启;Enter 或点击发送即打开主页开始对话
@@ -76,7 +77,7 @@ npm run dist
 ```
 pet-project/
 ├─ electron/              # 主进程
-│  ├─ main.js             #   窗口管理、状态机、IPC 注册、自动化测试钩子
+│  ├─ main.js             #   窗口管理、状态机、托盘、IPC 注册、自动化测试钩子
 │  ├─ preload.js          #   contextIsolation 安全桥(invoke/send/on)
 │  ├─ config.js           #   常量(API 地址、上下文条数等,不含密钥)
 │  ├─ prompt.js           #   蕾米埃尔角色系统提示词
@@ -91,7 +92,7 @@ pet-project/
 │     ├─ *.gif            #     原始状态动画(源资源)
 │     ├─ webp/*.webp      #     实际使用的动画(见"渲染兼容性说明")
 │     └─ 表情包-*.png     #     表情弹层 / 图标1.png 桌宠头像
-├─ build/icon.png         # 应用图标
+├─ build/icon.png         # 应用图标(同时作为托盘图标,经 extraResources 复制到 resources/)
 ├─ vite.config.js         # 双页面入口 + vite-plugin-electron
 └─ package.json
 ```
@@ -113,6 +114,11 @@ pet-project/
 - `app.disableHardwareAcceleration()` —— 软件合成
 - `disable-features: CalculateNativeWinOcclusion,BackgroundOcclusionTracking` —— 规避 Windows 遮挡误判停绘
 - 资源加载失败自动重试(0.5s × 6 次)—— 对抗杀软扫描期的瞬时读取失败
+
+### 窗口移动与托盘图标
+
+- 移动窗口统一使用 `setBounds({x,y,width,height})` 而非 `setPosition`:Windows 高 DPI 下,`setPosition` 把窗口移到屏幕底部时会触发窗口尺寸逐帧膨胀,导致光标跟随的下边界约束持续收缩而使桌宠向上漂移、甚至被挤出屏幕。夹取范围使用固定常量 `PET_W/PET_H`,不能用会漂移的 `getSize()`
+- 托盘图标按显示器 DPI 缩放到托盘实际像素尺寸(基准 16px,本机 150% 缩放下为 24px),避免放大模糊;`build/` 目录默认不进入 asar,故图标由 `package.json` 的 `extraResources` 复制到 `resources/icon.png`,主进程按 `app.isPackaged` 区分开发/打包路径读取
 
 ## 已知限制
 

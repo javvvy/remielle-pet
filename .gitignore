@@ -26,5 +26,4 @@ config/secrets.yml
 *.tmp
 *.bak
 
-release-v0.1.0/
-release-v0.2.1/
+release-v*/
