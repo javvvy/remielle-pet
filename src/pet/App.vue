@@ -156,7 +156,11 @@ function onPointerMove(e) {
 
 function onPointerUp() {
   ipcSend('pet:hold', false)
-  if (dragging && !moved) popRandomEmoji()
+  if (dragging && !moved) {
+    popRandomEmoji()
+    // 通知主进程点击:空闲阶段据此随机切换空闲动画(阶段判定与30秒冷却在主进程)
+    ipcSend('pet:clicked')
+  }
   dragging = false
 }
 

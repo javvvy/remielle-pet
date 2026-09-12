@@ -55,20 +55,64 @@ function logError(text) {
   } catch { /* 日志失败时静默 */ }
 }
 
+// 空闲阶段的动画轮换(发呆/思考/欣赏)
+const IDLE_ROTATE = {
+  CLICK_COOLDOWN: 30 * 1000,  // 点击切换动画的冷却:冷却期内点击不再切换
+  NO_CLICK_WAIT: 60 * 1000,   // 冷却走完后再等这么久仍无点击,则自动切换
+}
+
 function setPetGif(gif) {
   petGif = gif
   sendToPet('pet:state', gif)
 }
 
+// 当前阶段:idle(空闲) / creating(创作) / done(创作并完成) / appreciate(欣赏)
+// 只有 idle 允许点击切换与自动轮换
+let phase = 'idle'
+let idleSwitchAt = 0        // 上次空闲动画切换时间(冷却计时起点)
+let idleRotateTimer = null  // 无点击时自动轮换的计时器
+
+// 随机挑一个与当前不同的空闲动画,避免"点了没反应"的观感
+function randomIdleGif() {
+  const pool = IDLE_GIFS.filter(g => g !== petGif)
+  return random(pool.length ? pool : IDLE_GIFS)
+}
+
+function scheduleIdleRotate() {
+  clearTimeout(idleRotateTimer)
+  // 冷却期 + 无点击等待期都走完仍未切换 → 自动轮换
+  idleRotateTimer = setTimeout(() => {
+    if (phase === 'idle') rotateIdleGif()
+  }, IDLE_ROTATE.CLICK_COOLDOWN + IDLE_ROTATE.NO_CLICK_WAIT)
+}
+
+// 随机切换空闲动画,并重置冷却 / 自动轮换计时
+function rotateIdleGif() {
+  clearTimeout(idleRotateTimer)
+  idleSwitchAt = Date.now()
+  setPetGif(randomIdleGif())
+  scheduleIdleRotate()
+}
+
+// 点击桌宠主体:仅空闲阶段、且冷却已过才切换动画
+function onPetClicked() {
+  if (phase !== 'idle') return
+  if (Date.now() - idleSwitchAt < IDLE_ROTATE.CLICK_COOLDOWN) return
+  rotateIdleGif()
+}
+
 function enterIdle() {
   clearTimeout(petTimer)
   followable = true
-  setPetGif(random(IDLE_GIFS))
+  phase = 'idle'
+  rotateIdleGif()
 }
 
 function enterAppreciate() {
   clearTimeout(petTimer)
   followable = true
+  phase = 'appreciate'
+  clearTimeout(idleRotateTimer)
   setPetGif(random(APPRECIATE_GIFS))
   const duration = randInt(10, 60) * 1000
   petTimer = setTimeout(enterIdle, duration)
@@ -155,6 +199,9 @@ function createPetWindow() {
   petWin.webContents.on('did-fail-load', (_e, code, desc, url) => {
     logError(`pet window did-fail-load: ${code} ${desc} ${url}`)
   })
+  // 页面就绪后推送当前状态。渲染进程内置的默认动画是"发呆",主进程若不在启动时
+  // 推送随机结果,空闲阶段就会永远停在发呆;重载时也需要重新同步。
+  petWin.webContents.on('did-finish-load', () => sendToPet('pet:state', petGif))
   loadPage(petWin, 'pet.html')
 }
 
@@ -283,6 +330,8 @@ async function handleSend(text) {
 
   streaming = true
   followable = false
+  phase = 'creating'
+  clearTimeout(idleRotateTimer)   // 离开空闲:停止空闲动画轮换
   setPetGif(CREATING_GIF)
   clearTimeout(petTimer)
   // 创作过程中随机弹表情
@@ -305,6 +354,7 @@ async function handleSend(text) {
       sendToHome('chat:done', {})
       // 对话完成:创作并完成.gif 播放1秒 -> 欣赏阶段
       setPetGif(DONE_GIF)
+      phase = 'done'
       petTimer = setTimeout(enterAppreciate, 1000)
     } else {
       // 出错时回到空闲
@@ -342,6 +392,9 @@ function registerIpc() {
 
   // 渲染进程按住桌宠(拖动/点击/右键按下)时暂停跟随
   ipcMain.on('pet:hold', (_e, v) => { petHold = !!v })
+
+  // 渲染进程点击桌宠主体:空闲阶段据此随机切换动画(冷却与阶段判定在主进程)
+  ipcMain.on('pet:clicked', () => onPetClicked())
 
   ipcMain.handle('chat:send', (_e, text) => handleSend(text))
   ipcMain.handle('chat:new', () => {
@@ -407,6 +460,7 @@ if (!gotLock) {
     createPetWindow()
     registerIpc()
     createTray()
+    enterIdle()   // 启动即空闲:随机挑一个空闲动画,并开始冷却/自动轮换计时
     // 光标跟随常驻轮询(守卫不满足时空转,33次/秒布尔检查开销可忽略)
     setInterval(() => followTick(), FOLLOW.INTERVAL)
     // 自动化测试:PET_AUTOTEST=1 时在主进程直接驱动对话链路(密钥经环境变量传入,不进源码)
