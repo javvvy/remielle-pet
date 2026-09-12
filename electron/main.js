@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen, Tray, nativeImage } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, screen, Tray, nativeImage, shell } = require('electron')
 const path = require('node:path')
 const store = require('./store')
 const settings = require('./settings')
@@ -106,17 +106,42 @@ function enterIdle() {
   clearTimeout(petTimer)
   followable = true
   phase = 'idle'
+  setPainting('')
   rotateIdleGif()
 }
 
-function enterAppreciate() {
+// withPainting: 桌宠自己"创作"后进入欣赏时需要同时展示画作
+function enterAppreciate({ withPainting = false } = {}) {
   clearTimeout(petTimer)
   followable = true
   phase = 'appreciate'
   clearTimeout(idleRotateTimer)
   setPetGif(random(APPRECIATE_GIFS))
+  setPainting(withPainting ? randomPainting() : '')
   const duration = randInt(10, 60) * 1000
   petTimer = setTimeout(enterIdle, duration)
+}
+
+// 右键菜单"创作":不走大模型,固定 创作(3~10秒) → 创作并完成(1秒) → 欣赏(带画作)
+function startPetCreation() {
+  if (!petWin || petWin.isDestroyed()) return
+  if (streaming) {            // 对话进行中不打断,给出提示
+    sendToPet('pet:tip', '对话进行中,请稍候~')
+    return
+  }
+  clearTimeout(petTimer)
+  clearInterval(emojiTimer)
+  phase = 'creating'
+  followable = false
+  setPainting('')
+  clearTimeout(idleRotateTimer)
+  setPetGif(CREATING_GIF)
+  const duration = randInt(3, 10) * 1000
+  petTimer = setTimeout(() => {
+    setPetGif(DONE_GIF)
+    phase = 'done'
+    petTimer = setTimeout(() => enterAppreciate({ withPainting: true }), 1000)
+  }, duration)
 }
 
 // ---------- 光标跟随(空闲时) ----------
@@ -136,11 +161,20 @@ const FOLLOW = {
 // 导致下边界约束持续收缩、桌宠向上漂移甚至被挤出屏幕。
 const PET_W = 260
 const PET_H = 360
+// 画作区高度(基准):画作本身 240 + 与主体间距 8。欣赏阶段画作出现在主体上方,
+// 窗口需整体向上扩这么多并下移 stage,才能让画作露出来且主体在屏幕上不动。
+// 改动此处需同步 pet/App.vue 的 PAINT_H。
+const PAINT_H = 248
 // 桌宠缩放(0.1~2.0,持久化于 settings.json)。窗口尺寸、跟随锚点、菜单位置
 // 全部按同一比例换算;渲染进程用 CSS transform 缩放整个 stage,两者保持一致。
 let petScale = clampPetScale(settings.load().petScale)
+let paintingVisible = false   // 欣赏阶段是否正在展示画作(影响窗口高度与身体中心)
+let paintingNames = []        // 由渲染进程上报的可用画作文件名(渲染进程负责解析成 URL)
 const petW = () => Math.round(PET_W * petScale)
-const petH = () => Math.round(PET_H * petScale)
+const petH = () => Math.round((PET_H + (paintingVisible ? PAINT_H : 0)) * petScale)
+// 身体中心在窗口内的坐标(随缩放与画作区变化)
+const bodyCX = () => FOLLOW.BODY_CX * petScale
+const bodyCY = () => (FOLLOW.BODY_CY + (paintingVisible ? PAINT_H : 0)) * petScale
 let followEnabled = settings.load().followEnabled  // 光标跟随开关,持久化于 settings.json(默认开启)
 let followable = true     // 状态机允许(启动即空闲,初始true)
 let petHold = false       // 渲染进程在桌宠上按住指针(拖动/点击/右键)
@@ -159,9 +193,9 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
   const [x, y] = petWin.getPosition()
   const w = petW()
   const h = petH()
-  // 身体中心停在光标右下方:身体中心距窗口左上角 (BODY_CX, BODY_CY) * 缩放
-  const tx = cursor.x + (FOLLOW.OFFSET_X - FOLLOW.BODY_CX) * petScale
-  const ty = cursor.y + (FOLLOW.OFFSET_Y - FOLLOW.BODY_CY) * petScale
+  // 身体中心停在光标右下方:身体中心距窗口左上角由 bodyCX/bodyCY 给出
+  const tx = cursor.x + FOLLOW.OFFSET_X * petScale - bodyCX()
+  const ty = cursor.y + FOLLOW.OFFSET_Y * petScale - bodyCY()
   const dx = tx - x
   const dy = ty - y
   const dist = Math.hypot(dx, dy)
@@ -183,6 +217,24 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
   return true
 }
 
+// 以"身体中心在屏幕上保持不动"为约束,按当前的 petScale / paintingVisible 重设窗口
+// 尺寸与位置。oldScale/oldShift 是变更前用于反推身体中心屏幕坐标的旧几何。
+// 缩放变化、画作区出现/消失都走这里,保证桌宠不跳位。
+function relayoutPet(oldScale, oldShift) {
+  if (!petWin || petWin.isDestroyed()) return
+  const [x, y] = petWin.getPosition()
+  const cx = x + FOLLOW.BODY_CX * oldScale
+  const cy = y + (FOLLOW.BODY_CY + oldShift) * oldScale
+  const w = petW()
+  const h = petH()
+  let nx = cx - bodyCX()
+  let ny = cy - bodyCY()
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) }).workArea
+  nx = Math.min(Math.max(nx, wa.x), Math.max(wa.x, wa.x + wa.width - w))
+  ny = Math.min(Math.max(ny, wa.y), Math.max(wa.y, wa.y + wa.height - h))
+  petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: w, height: h })
+}
+
 // 应用缩放:窗口尺寸随之变化,并以身体中心为锚点重定位,避免缩放时桌宠跳动。
 // 返回收敛后的实际缩放值(调用方可用它回显/夹取)。
 function applyPetScale(next) {
@@ -191,21 +243,22 @@ function applyPetScale(next) {
   petScale = s
   sendToPet('pet:scale', s)
   if (s === prev) return s
-  if (petWin && !petWin.isDestroyed()) {
-    const [x, y] = petWin.getPosition()
-    // 缩放前后身体中心的屏幕坐标保持不变
-    const cx = x + FOLLOW.BODY_CX * prev
-    const cy = y + FOLLOW.BODY_CY * prev
-    const w = petW()
-    const h = petH()
-    let nx = cx - FOLLOW.BODY_CX * s
-    let ny = cy - FOLLOW.BODY_CY * s
-    const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) }).workArea
-    nx = Math.min(Math.max(nx, wa.x), Math.max(wa.x, wa.x + wa.width - w))
-    ny = Math.min(Math.max(ny, wa.y), Math.max(wa.y, wa.y + wa.height - h))
-    petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: w, height: h })
-  }
+  relayoutPet(prev, paintingVisible ? PAINT_H : 0)
   return s
+}
+
+// 展示/收起画作(name 为空则收起)。窗口向上扩出画作区,主体位置不变。
+function setPainting(name) {
+  const visible = !!name
+  sendToPet('pet:painting', name || '')
+  if (visible === paintingVisible) return
+  const oldShift = paintingVisible ? PAINT_H : 0
+  paintingVisible = visible
+  relayoutPet(petScale, oldShift)
+}
+
+function randomPainting() {
+  return paintingNames.length ? random(paintingNames) : ''
 }
 
 // ---------- 桌宠窗口 ----------
@@ -278,6 +331,11 @@ function createHomeWindow() {
     homeWin.hide()
     if (petWin && !petWin.isDestroyed()) petWin.setAlwaysOnTop(true)
   })
+  // 关于页的外链一律交给系统浏览器,避免在应用内开出一个无样式的空白窗口
+  homeWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (String(url).startsWith('https:')) shell.openExternal(url)
+    return { action: 'deny' }
+  })
   loadPage(homeWin, 'home.html')
 }
 
@@ -294,6 +352,7 @@ function loadPage(win, page, query) {
 function buildPetMenu() {
   return Menu.buildFromTemplate([
     { label: '对话框', click: () => sendToPet('pet:toggleInput') },
+    { label: '创作', click: () => startPetCreation() },
     { label: '主页', click: () => createHomeWindow() },
     {
       label: pinned ? '解除固定' : '固定',
@@ -380,6 +439,7 @@ async function handleSend(text) {
   streaming = true
   followable = false
   phase = 'creating'
+  setPainting('')                 // 创作对话时收起画作
   clearTimeout(idleRotateTimer)   // 离开空闲:停止空闲动画轮换
   setPetGif(CREATING_GIF)
   clearTimeout(petTimer)
@@ -450,6 +510,11 @@ function registerIpc() {
   // 渲染进程点击桌宠主体:空闲阶段据此随机切换动画(冷却与阶段判定在主进程)
   ipcMain.on('pet:clicked', () => onPetClicked())
 
+  // 渲染进程上报可用画作文件名(它负责把名字解析成打包后的资源 URL,主进程只随机挑名字)
+  ipcMain.on('pet:paintings', (_e, names) => {
+    paintingNames = Array.isArray(names) ? names.filter(n => typeof n === 'string') : []
+  })
+
   ipcMain.handle('chat:send', (_e, text) => handleSend(text))
   ipcMain.handle('chat:new', () => {
     if (streaming) return { busy: true }
@@ -472,6 +537,21 @@ function registerIpc() {
   ipcMain.handle('app:quit', () => {
     app.quitting = true
     app.quit()
+  })
+
+  // 关于页:版本号取运行中的应用版本(打包后即 asar 内 package.json 的 version)
+  ipcMain.handle('app:info', () => ({ version: app.getVersion() }))
+
+  // 用系统浏览器打开外部链接。只放行 https,避免渲染进程借它拉起任意协议
+  ipcMain.handle('app:openExternal', (_e, url) => {
+    try {
+      const u = new URL(String(url))
+      if (u.protocol !== 'https:') return false
+      shell.openExternal(u.toString())
+      return true
+    } catch {
+      return false
+    }
   })
 
   // 渲染进程诊断上报(资源加载失败等)

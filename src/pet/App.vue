@@ -8,6 +8,16 @@
     <!-- 提示气泡 -->
     <div v-if="tip" class="tip-bubble">{{ tip }}</div>
 
+    <!-- 创作产物:欣赏阶段展示在主体上方,与主体同尺寸 -->
+    <img
+      v-if="paintingSrc"
+      class="pet-painting"
+      :key="painting"
+      :src="paintingSrc"
+      draggable="false"
+      @error="onPaintingError"
+    />
+
     <!-- 桌宠主体 -->
     <img
       ref="petEl"
@@ -54,9 +64,19 @@ const emojis = Object.fromEntries(
 )
 const emojiNames = Object.keys(emojis)
 
+// 画作(欣赏阶段展示):文件名上报给主进程随机挑选,这里负责解析成打包后的 URL
+const paintingFiles = import.meta.glob('../assets/paintings/*.{png,jpg,jpeg,webp}', { eager: true, query: '?url', import: 'default' })
+const paintings = Object.fromEntries(Object.entries(paintingFiles).map(([k, v]) => [k.split('/').pop(), v]))
+
+// 画作区高度,必须与 electron/main.js 的 PAINT_H 一致(主体上方:画作 240 + 间距 8)
+const PAINT_H = 248
+
 // 桌宠缩放:初始值随 URL 传入(主进程 loadPage 的 query),避免首帧按 1.0 渲染后跳变
 const petScale = ref(Number(new URLSearchParams(location.search).get('scale')) || 1)
-const stageStyle = computed(() => ({ transform: `scale(${petScale.value})` }))
+// 有画作时整个 stage 下移 PAINT_H,给上方的画作腾出位置(主体在屏幕上不动)
+const stageStyle = computed(() => ({
+  transform: `scale(${petScale.value}) translateY(${paintingSrc.value ? PAINT_H : 0}px)`,
+}))
 
 const gif = ref('发呆.gif')
 const gifSrc = ref('')
@@ -86,6 +106,18 @@ function onImgError(name) {
 function showGif(name) {
   gif.value = name
   gifSrc.value = retryableSrc(name)
+}
+
+// 画作:主进程给出文件名,这里解析 URL(画作比主体大,失败只上报不重试占位)
+const painting = ref('')
+const paintingSrc = ref('')
+function showPainting(name) {
+  painting.value = name || ''
+  paintingSrc.value = name ? (paintings[name] || '') : ''
+  if (name && !paintingSrc.value) window.electron.send('diag:error', `painting not found: ${name}`)
+}
+function onPaintingError() {
+  window.electron.send('diag:error', `painting load failed: ${painting.value}`)
 }
 const emoji = ref('')
 const emojiKey = ref(0)
@@ -205,6 +237,9 @@ onMounted(() => {
   offs.push(hookOn('pet:tip', t => showTip(t)))
   offs.push(hookOn('pet:flip', d => (flipped.value = d === -1)))
   offs.push(hookOn('pet:scale', s => (petScale.value = s)))
+  offs.push(hookOn('pet:painting', name => showPainting(name)))
+  // 上报可用画作文件名,供主进程随机挑选
+  ipcSend('pet:paintings', Object.keys(paintings))
 })
 
 onBeforeUnmount(() => offs.forEach(off => off()))
@@ -230,6 +265,18 @@ onBeforeUnmount(() => offs.forEach(off => off()))
 .pet-body.flipped {
   transform: scaleX(-1);
 }
+/* 创作产物:位于主体上方(主体 top:60,画作 240 + 间距 8),与主体同尺寸同处理方式 */
+.pet-painting {
+  position: absolute;
+  left: 10px;
+  top: -248px;
+  width: 240px;
+  height: 240px;
+  object-fit: contain;
+  pointer-events: none;
+  animation: paint-in 0.35s ease;
+}
+@keyframes paint-in { from { opacity: 0; transform: translateY(8px); } }
 .emoji-pop {
   position: absolute;
   top: 0;

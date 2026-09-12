@@ -1,6 +1,6 @@
 {
   "name": "remielle-pet",
-  "version": "0.2.4",
+  "version": "1.0.0",
   "description": "蕾米埃尔桌宠 - 可对话的AI桌宠软件",
   "main": "dist-electron/main.js",
   "author": "remielle-pet",

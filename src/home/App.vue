@@ -106,8 +106,19 @@
         </div>
       </section>
 
-      <!-- 关于栏(空内容) -->
-      <section v-else class="placeholder-page"></section>
+      <!-- 关于栏 -->
+      <section v-else class="about-page">
+        <div class="about-card">
+          <img class="about-logo" :src="avatar" draggable="false" />
+          <div class="about-name">蕾米埃尔</div>
+          <div class="about-version">v{{ appVersion }}</div>
+          <p class="about-desc">remielle-pet是可对话的 AI 桌宠软件,桌面悬浮一位可爱的动画桌宠"蕾米埃尔",由用户接入云端大模型进行角色扮演对话</p>
+          <div class="about-repo">
+            <span class="about-repo-label">源码地址</span>
+            <a class="about-link" :href="repoUrl" @click.prevent="openRepo">{{ repoUrl }}</a>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- 模型配置弹窗 -->
@@ -199,6 +210,20 @@ async function toggleFollow() {
   const saved = await invoke('settings:save', { followEnabled: !followEnabled.value })
   followEnabled.value = saved.followEnabled
   showToast(saved.followEnabled ? '光标跟随已开启' : '光标跟随已关闭')
+}
+
+// ---------- 关于 ----------
+const repoUrl = 'https://github.com/javvvy/remielle-pet'
+const appVersion = ref('')
+
+async function refreshAppInfo() {
+  const info = await invoke('app:info')
+  appVersion.value = info?.version || ''
+}
+
+// 交给系统浏览器打开(主进程只放行 https)
+function openRepo() {
+  invoke('app:openExternal', repoUrl)
 }
 
 // ---------- 桌宠缩放 ----------
@@ -295,6 +320,7 @@ onMounted(async () => {
   conversation.value = await invoke('chat:current')
   await refreshHistory()
   await refreshModelCfg()
+  await refreshAppInfo()
   // 窗口加载晚于主进程事件时的补发(如配置缺失提示、右键菜单"设置"跳转)
   const flags = await invoke('chat:promptFlags')
   if (flags.configMissing) openConfigPrompt()
@@ -466,13 +492,63 @@ onBeforeUnmount(() => offs.forEach(off => off()))
 }
 .send-btn.active:hover { background: #e04f9a; }
 
-.placeholder-page {
+/* 关于页 */
+.about-page {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 32px;
 }
-.placeholder-text { color: #ccc; font-size: 15px; }
+.about-card {
+  max-width: 460px;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #f0e4ea;
+  border-radius: 16px;
+  padding: 36px 32px;
+  text-align: center;
+  box-shadow: 0 6px 24px rgba(240, 98, 171, 0.07);
+}
+.about-logo {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.1);
+}
+.about-name {
+  font-size: 19px;
+  font-weight: 600;
+  color: #444;
+  margin-top: 16px;
+}
+.about-version {
+  font-size: 13px;
+  color: #c95d94;
+  margin-top: 6px;
+}
+.about-desc {
+  font-size: 13px;
+  line-height: 1.9;
+  color: #888;
+  margin-top: 20px;
+  text-align: left;
+}
+.about-repo {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #f6eef2;
+  font-size: 13px;
+}
+.about-repo-label { color: #bbb; margin-right: 8px; }
+.about-link {
+  color: #f062ab;
+  text-decoration: none;
+  word-break: break-all;
+  cursor: pointer;
+}
+.about-link:hover { text-decoration: underline; }
 
 /* 设置页 */
 .settings-page { flex: 1; padding: 32px 36px; }
