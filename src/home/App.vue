@@ -83,6 +83,27 @@
             <div class="switch" :class="{ on: followEnabled }"><div class="knob"></div></div>
           </div>
         </div>
+
+        <!-- 桌宠缩放 -->
+        <div class="settings-card">
+          <div class="settings-card-row">
+            <div>
+              <div class="settings-card-title">桌宠大小</div>
+              <div class="settings-card-desc">拖动滑块实时预览,松手保存。范围 10%~200%</div>
+            </div>
+            <div class="scale-value">{{ petScalePct }}%</div>
+          </div>
+          <input
+            class="scale-slider"
+            type="range"
+            min="10"
+            max="200"
+            step="5"
+            :value="petScalePct"
+            @input="onScaleInput"
+            @change="onScaleCommit"
+          />
+        </div>
       </section>
 
       <!-- 关于栏(空内容) -->
@@ -127,7 +148,7 @@
 
 <script setup>
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { invoke, on as hookOn } from '../bridge'
+import { invoke, on as hookOn, send as ipcSend } from '../bridge'
 import avatarUrl from '../assets/图标1.png'
 
 const avatar = avatarUrl
@@ -169,6 +190,7 @@ const configPromptVisible = ref(false)
 async function refreshModelCfg() {
   modelCfg.value = await invoke('settings:get')
   followEnabled.value = modelCfg.value.followEnabled !== false
+  petScalePct.value = Math.round((modelCfg.value.petScale ?? 1) * 100)
 }
 
 const followEnabled = ref(true)
@@ -177,6 +199,24 @@ async function toggleFollow() {
   const saved = await invoke('settings:save', { followEnabled: !followEnabled.value })
   followEnabled.value = saved.followEnabled
   showToast(saved.followEnabled ? '光标跟随已开启' : '光标跟随已关闭')
+}
+
+// ---------- 桌宠缩放 ----------
+// 滑块的 10~200 与 electron/config.js 的 PET_SCALE_MIN/MAX 对应;越界由主进程夹取
+const petScalePct = ref(100)
+
+// 拖动过程只送到主进程实时应用,不落盘
+function onScaleInput(e) {
+  const pct = Number(e.target.value)
+  petScalePct.value = pct
+  ipcSend('pet:setScale', pct / 100)
+}
+
+// 松手时持久化(settings:save 已合并语义,不会覆盖其它设置)
+async function onScaleCommit(e) {
+  const pct = Number(e.target.value)
+  const saved = await invoke('settings:save', { petScale: pct / 100 })
+  petScalePct.value = Math.round((saved.petScale ?? 1) * 100)
 }
 
 function openModelConfig() {
@@ -255,9 +295,12 @@ onMounted(async () => {
   conversation.value = await invoke('chat:current')
   await refreshHistory()
   await refreshModelCfg()
-  // 窗口加载晚于主进程事件时的补发(如配置缺失提示)
+  // 窗口加载晚于主进程事件时的补发(如配置缺失提示、右键菜单"设置"跳转)
   const flags = await invoke('chat:promptFlags')
   if (flags.configMissing) openConfigPrompt()
+  if (flags.gotoSettings) switchTab('settings')
+  // 窗口已存在时的即时跳转(桌宠右键菜单 → 设置)
+  offs.push(hookOn('home:gotoSettings', () => switchTab('settings')))
   offs.push(hookOn('chat:reset', conv => {
     conversation.value = conv
     streaming.value = true
@@ -468,6 +511,38 @@ onBeforeUnmount(() => offs.forEach(off => off()))
   transition: transform 0.15s;
 }
 .switch.on .knob { transform: translateX(18px); }
+
+/* 桌宠缩放滑块 */
+.scale-value {
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #c95d94;
+  min-width: 52px;
+  text-align: right;
+}
+.scale-slider {
+  width: 100%;
+  margin-top: 16px;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: #f0e4ea;
+  outline: none;
+  cursor: pointer;
+}
+.scale-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f062ab;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(240, 98, 171, 0.4);
+  cursor: pointer;
+}
 
 /* 弹窗 */
 .modal-mask {

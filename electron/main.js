@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, Menu, screen, Tray, nativeImage } = require
 const path = require('node:path')
 const store = require('./store')
 const settings = require('./settings')
+const { clampPetScale } = require('./config')
 const { streamChat } = require('./zhipu')
 
 // 静态资源文件名(gif状态 / 表情包)
@@ -126,14 +127,20 @@ const FOLLOW = {
   OFFSET_X: 110,  // 身体中心停在光标右下方(110,70),不遮挡指针
   OFFSET_Y: 70,
   DEADZONE: 24,   // 距目标小于该值停止,避免抖动
-  BODY_CX: 130,   // 身体中心在窗内坐标 = CSS(top:60,left:10,240×240)+ 120
+  BODY_CX: 130,   // 缩放1.0时身体中心在窗内坐标 = CSS(top:60,left:10,240×240)+ 120
   BODY_CY: 180,
 }
-// 桌宠窗口固定宽高(与 createPetWindow 保持一致)。夹取范围与 setBounds 必须用这个
-// 固定值,不能用 getSize():在 Windows 高 DPI 下,setPosition 把窗口移到屏幕底部时
-// 会触发窗口尺寸逐帧膨胀,导致下边界约束持续收缩、桌宠向上漂移甚至被挤出屏幕。
+// 桌宠窗口基准宽高(缩放 1.0 时,与 pet/App.vue 的 .pet-stage 一致)。
+// 夹取范围与 setBounds 必须用这个基准乘缩放后的值,不能用 getSize():
+// 在 Windows 高 DPI 下,setPosition 把窗口移到屏幕底部时会触发窗口尺寸逐帧膨胀,
+// 导致下边界约束持续收缩、桌宠向上漂移甚至被挤出屏幕。
 const PET_W = 260
 const PET_H = 360
+// 桌宠缩放(0.1~2.0,持久化于 settings.json)。窗口尺寸、跟随锚点、菜单位置
+// 全部按同一比例换算;渲染进程用 CSS transform 缩放整个 stage,两者保持一致。
+let petScale = clampPetScale(settings.load().petScale)
+const petW = () => Math.round(PET_W * petScale)
+const petH = () => Math.round(PET_H * petScale)
 let followEnabled = settings.load().followEnabled  // 光标跟随开关,持久化于 settings.json(默认开启)
 let followable = true     // 状态机允许(启动即空闲,初始true)
 let petHold = false       // 渲染进程在桌宠上按住指针(拖动/点击/右键)
@@ -150,8 +157,11 @@ function followAllowed() {
 function followTick(cursor = screen.getCursorScreenPoint()) {
   if (!followAllowed()) return false
   const [x, y] = petWin.getPosition()
-  const tx = cursor.x + FOLLOW.OFFSET_X - FOLLOW.BODY_CX
-  const ty = cursor.y + FOLLOW.OFFSET_Y - FOLLOW.BODY_CY
+  const w = petW()
+  const h = petH()
+  // 身体中心停在光标右下方:身体中心距窗口左上角 (BODY_CX, BODY_CY) * 缩放
+  const tx = cursor.x + (FOLLOW.OFFSET_X - FOLLOW.BODY_CX) * petScale
+  const ty = cursor.y + (FOLLOW.OFFSET_Y - FOLLOW.BODY_CY) * petScale
   const dx = tx - x
   const dy = ty - y
   const dist = Math.hypot(dx, dy)
@@ -159,12 +169,12 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
   const step = Math.min(dist * FOLLOW.LERP, FOLLOW.MAX_STEP)
   let nx = x + (dx / dist) * step
   let ny = y + (dy / dist) * step
-  // 夹在光标所在显示器工作区内(支持多显示器,不出屏)
+  // 夹在光标所在显示器工作区内(支持多显示器,不出屏);Math.max 兜底窗口比工作区还大的极端缩放
   const wa = screen.getDisplayNearestPoint(cursor).workArea
-  nx = Math.min(Math.max(nx, wa.x), wa.x + wa.width - PET_W)
-  ny = Math.min(Math.max(ny, wa.y), wa.y + wa.height - PET_H)
+  nx = Math.min(Math.max(nx, wa.x), Math.max(wa.x, wa.x + wa.width - w))
+  ny = Math.min(Math.max(ny, wa.y), Math.max(wa.y, wa.y + wa.height - h))
   // 用 setBounds 显式带回固定宽高,避免 setPosition 在屏幕底部引发窗口尺寸漂移
-  petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: PET_W, height: PET_H })
+  petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: w, height: h })
   // 朝移动方向转身(素材为微朝右的3/4正面,右移不翻转、左移镜像)
   if (Math.abs(dx) > 4) {
     const dir = dx > 0 ? 1 : -1
@@ -173,14 +183,41 @@ function followTick(cursor = screen.getCursorScreenPoint()) {
   return true
 }
 
+// 应用缩放:窗口尺寸随之变化,并以身体中心为锚点重定位,避免缩放时桌宠跳动。
+// 返回收敛后的实际缩放值(调用方可用它回显/夹取)。
+function applyPetScale(next) {
+  const prev = petScale
+  const s = clampPetScale(next)
+  petScale = s
+  sendToPet('pet:scale', s)
+  if (s === prev) return s
+  if (petWin && !petWin.isDestroyed()) {
+    const [x, y] = petWin.getPosition()
+    // 缩放前后身体中心的屏幕坐标保持不变
+    const cx = x + FOLLOW.BODY_CX * prev
+    const cy = y + FOLLOW.BODY_CY * prev
+    const w = petW()
+    const h = petH()
+    let nx = cx - FOLLOW.BODY_CX * s
+    let ny = cy - FOLLOW.BODY_CY * s
+    const wa = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) }).workArea
+    nx = Math.min(Math.max(nx, wa.x), Math.max(wa.x, wa.x + wa.width - w))
+    ny = Math.min(Math.max(ny, wa.y), Math.max(wa.y, wa.y + wa.height - h))
+    petWin.setBounds({ x: Math.round(nx), y: Math.round(ny), width: w, height: h })
+  }
+  return s
+}
+
 // ---------- 桌宠窗口 ----------
 function createPetWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
+  const w = petW()
+  const h = petH()
   petWin = new BrowserWindow({
-    width: PET_W,
-    height: PET_H,
-    x: Math.round(width / 2 - PET_W / 2),
-    y: Math.round(height / 2 - PET_H / 2),
+    width: w,
+    height: h,
+    x: Math.round(width / 2 - w / 2),
+    y: Math.round(height / 2 - h / 2),
     transparent: true,
     frame: false,
     resizable: false,
@@ -202,7 +239,8 @@ function createPetWindow() {
   // 页面就绪后推送当前状态。渲染进程内置的默认动画是"发呆",主进程若不在启动时
   // 推送随机结果,空闲阶段就会永远停在发呆;重载时也需要重新同步。
   petWin.webContents.on('did-finish-load', () => sendToPet('pet:state', petGif))
-  loadPage(petWin, 'pet.html')
+  // 初始缩放随 URL 传入,渲染进程在首次渲染前就能拿到,避免先按 1.0 画一帧再跳变
+  loadPage(petWin, 'pet.html', { scale: String(petScale) })
 }
 
 // ---------- 主页窗口 ----------
@@ -243,11 +281,12 @@ function createHomeWindow() {
   loadPage(homeWin, 'home.html')
 }
 
-function loadPage(win, page) {
+function loadPage(win, page, query) {
+  const qs = query ? '?' + new URLSearchParams(query).toString() : ''
   if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL + '/' + page)
+    win.loadURL(process.env.VITE_DEV_SERVER_URL + '/' + page + qs)
   } else {
-    win.loadFile(path.join(__dirname, '../dist/src', page))
+    win.loadFile(path.join(__dirname, '../dist/src', page), query ? { query } : undefined)
   }
 }
 
@@ -261,7 +300,7 @@ function buildPetMenu() {
       click: () => { pinned = !pinned; sendToPet('pet:pinned', pinned) },
     },
     { label: '跟随光标', type: 'checkbox', checked: followEnabled, click: m => { followEnabled = settings.save({ followEnabled: m.checked }).followEnabled } },
-    { label: '设置', click: () => sendToPet('pet:tip', '该功能正在开发中~') },
+    { label: '设置', click: () => openHomeSettings() },
     { label: '退出', click: () => { app.quitting = true; app.quit() } },
   ])
 }
@@ -312,6 +351,16 @@ let pendingConfigPrompt = false
 function promptGoSettings() {
   pendingConfigPrompt = true
   sendToHome('chat:configMissing')
+}
+
+// 打开主页并切到设置页(右键菜单"设置"入口)。
+// 主页窗口首次创建时页面还没就绪,事件会丢,故用标记位在挂载后补发。
+let pendingGotoSettings = false
+function openHomeSettings() {
+  const needFlag = !homeWin || homeWin.isDestroyed()
+  createHomeWindow()
+  if (needFlag) pendingGotoSettings = true
+  else sendToHome('home:gotoSettings')
 }
 
 async function handleSend(text) {
@@ -369,9 +418,14 @@ function registerIpc() {
   ipcMain.on('app:contextmenu', () => {
     if (!petWin) return
     const menu = buildPetMenu()
-    // 弹出在主体右方
+    // 弹出在主体右方(按缩放换算,小尺寸时菜单仍贴着桌宠)
     menuOpen = true
-    menu.popup({ window: petWin, x: 262, y: 60, callback: () => { menuOpen = false } })
+    menu.popup({
+      window: petWin,
+      x: Math.round(262 * petScale),
+      y: Math.round(60 * petScale),
+      callback: () => { menuOpen = false },
+    })
   })
 
   // 桌宠拖动(未固定时可拖动);高DPI/触摸板下dx/dy为小数,累积后取整,避免抖动和崩溃
@@ -387,7 +441,7 @@ function registerIpc() {
     accX -= mx
     accY -= my
     const [x, y] = petWin.getPosition()
-    petWin.setBounds({ x: x + mx, y: y + my, width: PET_W, height: PET_H })
+    petWin.setBounds({ x: x + mx, y: y + my, width: petW(), height: petH() })
   })
 
   // 渲染进程按住桌宠(拖动/点击/右键按下)时暂停跟随
@@ -423,18 +477,23 @@ function registerIpc() {
   // 渲染进程诊断上报(资源加载失败等)
   ipcMain.on('diag:error', (_e, msg) => logError(`[renderer] ${msg}`))
 
-  // 设置:大模型配置与光标跟随开关读写(保存后同步主进程跟随状态)
+  // 设置:大模型配置 / 光标跟随开关 / 桌宠缩放读写(保存后同步主进程状态)
   ipcMain.handle('settings:get', () => settings.load())
   ipcMain.handle('settings:save', (_e, cfg) => {
     const saved = settings.save(cfg || {})
     followEnabled = saved.followEnabled
+    applyPetScale(saved.petScale)
     return saved
   })
 
+  // 缩放滑块的实时预览:只应用不落盘,松手(change)时走 settings:save 持久化
+  ipcMain.on('pet:setScale', (_e, v) => applyPetScale(v))
+
   // 主页加载晚于事件时的补发标记(如配置缺失提示)
   ipcMain.handle('chat:promptFlags', () => {
-    const flags = { configMissing: pendingConfigPrompt }
+    const flags = { configMissing: pendingConfigPrompt, gotoSettings: pendingGotoSettings }
     pendingConfigPrompt = false
+    pendingGotoSettings = false
     return flags
   })
 }
@@ -504,6 +563,20 @@ if (!gotLock) {
           settings.save({ followEnabled: true })
           logError(`[autotest] T7c follow-restore: loaded=${settings.load().followEnabled} (expect true)`)
           followEnabled = true
+          // T8: 缩放(窗口尺寸联动 / 越界夹取 / 身体中心锚定不跳位)
+          applyPetScale(1)
+          const [sw1, sh1] = petWin.getSize()
+          const [sp1] = petWin.getPosition()
+          const got1 = applyPetScale(0.5)
+          const [sw2, sh2] = petWin.getSize()
+          const [sp2] = petWin.getPosition()
+          // 缩放前身体中心 = 位置 + 130*缩放,缩放后应保持不变
+          const cx1 = sp1 + 130 * 1
+          const cx2 = sp2 + 130 * 0.5
+          logError(`[autotest] T8 scale: 1.0->${sw1}x${sh1} 0.5->${sw2}x${sh2} (expect 260x360 then 130x180)`)
+          logError(`[autotest] T8b scale-anchor: bodyCX ${cx1}->${Math.round(cx2)} (expect 相同) got=${got1}`)
+          logError(`[autotest] T8c scale-clamp: clampPetScale(9)=${clampPetScale(9)} (expect 2) clampPetScale(0.001)=${clampPetScale(0.001)} (expect 0.1) clampPetScale('x')=${clampPetScale('x')} (expect 1)`)
+          applyPetScale(1)
           logError('[autotest] === end ===')
         } catch (e) {
           logError(`[autotest] ERROR ${e.stack || e}`)

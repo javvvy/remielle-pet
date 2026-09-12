@@ -1,5 +1,5 @@
 <template>
-  <div class="pet-stage" @contextmenu.prevent="openMenu">
+  <div class="pet-stage" :style="stageStyle" @contextmenu.prevent="openMenu">
     <!-- 随机表情弹层 -->
     <div v-if="emoji" class="emoji-pop" :key="emojiKey">
       <img :src="emojiSrc" draggable="false" @error="onImgError(emoji)" />
@@ -38,7 +38,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { on as hookOn, send as ipcSend } from '../bridge'
 
 // 主体使用动画WebP(规避Chromium透明窗口下GIF绘制缺陷),状态名仍沿用.gif后缀
@@ -54,9 +54,14 @@ const emojis = Object.fromEntries(
 )
 const emojiNames = Object.keys(emojis)
 
+// 桌宠缩放:初始值随 URL 传入(主进程 loadPage 的 query),避免首帧按 1.0 渲染后跳变
+const petScale = ref(Number(new URLSearchParams(location.search).get('scale')) || 1)
+const stageStyle = computed(() => ({ transform: `scale(${petScale.value})` }))
+
 const gif = ref('发呆.gif')
 const gifSrc = ref('')
 const emojiSrc = ref('')
+
 // 资源加载失败重试(对抗杀软扫描期等瞬时读取失败)
 const retryCounts = new Map()
 function retryableSrc(name) {
@@ -199,6 +204,7 @@ onMounted(() => {
   }))
   offs.push(hookOn('pet:tip', t => showTip(t)))
   offs.push(hookOn('pet:flip', d => (flipped.value = d === -1)))
+  offs.push(hookOn('pet:scale', s => (petScale.value = s)))
 })
 
 onBeforeUnmount(() => offs.forEach(off => off()))
@@ -209,6 +215,8 @@ onBeforeUnmount(() => offs.forEach(off => off()))
   position: relative;
   width: 260px;
   height: 360px;
+  /* 缩放以左上角为原点,与主进程按 260/360 基准换算窗口尺寸保持一致 */
+  transform-origin: top left;
 }
 .pet-body {
   position: absolute;
